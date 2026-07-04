@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.optimize import fsolve, minimize
 
 class ParallelThermoelectricSensitivity:
@@ -9,6 +10,10 @@ class ParallelThermoelectricSensitivity:
         self.cp_al = params.get('cp_al', 900.0)
         self.m_al = self.rho_al * (self.Lx * self.Ly * self.Lz)
         self.C_al = self.m_al * self.cp_al
+        self.T_init = params.get('T_init', params.get('T_amb', 25.0))
+        self.stabilization_tolerance = params.get('stabilization_tolerance', 0.5)
+        self.stabilization_rate_tolerance = params.get('stabilization_rate_tolerance', 0.01)
+        self.stabilization_max_time = params.get('stabilization_max_time', 7200.0)
 
         # Isolamento
         self.L_ins = params['L_ins']
@@ -112,8 +117,125 @@ class ParallelThermoelectricSensitivity:
         sol = fsolve(self.steady_state_residuals, guess, args=(I,), xtol=1e-6)
         Tc, Th = sol
         Qc, Qh, Pel, COP, alpha, R, K = self.total_performance(Tc, Th, I)
-        return {'Tc': Tc, 'Th': Th, 'Qc': Qc, 'Qh': Qh, 'Pel': Pel, 'COP': COP,
-                'alpha': alpha, 'R': R, 'K': K}
+        result = {'Tc': Tc, 'Th': Th, 'Qc': Qc, 'Qh': Qh, 'Pel': Pel, 'COP': COP,
+                  'alpha': alpha, 'R': R, 'K': K}
+        result['tempo_estabilizacao_s'] = self.estimate_stabilization_time(I, T_init=self.T_init, ss=result)
+        return result
+
+    def estimate_stabilization_time(self, I, T_init=None, tolerance=None, max_time=None, ss=None):
+        if isinstance(I, (np.ndarray, list, tuple)):
+            I = I[0]
+        I = float(I)
+        if T_init is None:
+            T_init = self.T_init
+        if tolerance is None:
+            tolerance = self.stabilization_tolerance
+        if max_time is None:
+            max_time = self.stabilization_max_time
+
+        if ss is None:
+            ss = self.steady_state(I, guess=[float(T_init) - 10.0, self.T_amb + 5.0])
+        Tc_target = float(ss['Tc'])
+        delta0 = abs(Tc_target - float(T_init))
+        if delta0 <= tolerance:
+            return 0.0
+
+        g_eff = max(self.U * self.A_ext, 1e-6)
+        tau = self.C_al / g_eff
+        if np.isfinite(ss.get('Qc', np.nan)) and abs(float(ss['Qc'])) > 1e-6:
+            cooling_strength = max(abs(float(ss['Qc'])) / max(abs(Tc_target - self.T_amb), 1e-3), 1.0)
+            tau = tau / cooling_strength
+
+        if not np.isfinite(tau) or tau <= 0.0:
+            tau = max(self.C_al / max(g_eff, 1e-6), 1.0)
+
+        time_s = -tau * np.log(max(tolerance / max(delta0, tolerance), 1e-12))
+        return float(np.clip(time_s, 0.0, max_time))
+
+    def _solve_hot_side_temperature(self, Tc, I):
+        if isinstance(I, (np.ndarray, list, tuple)):
+            I = I[0]
+        I = float(I)
+
+        def residual(Th):
+            _, Qh, _, _, _, _, _ = self.total_performance(Tc, Th, I)
+            if self.cooling_type == 'air':
+                Th_calc = self.T_amb + Qh * self.R_hs
+            else:
+                delta_Tw = Qh / (self.m_dot_w * self.cp_w)
+                Th_calc = self.T_w_in + delta_Tw + Qh * self.R_block
+            return Th - Th_calc
+
+        try:
+            return float(fsolve(residual, self.T_amb + 5.0, xtol=1e-6)[0])
+        except Exception:
+            return float(self.T_amb + 5.0)
+
+    def simulate_temperature_transient(self, I, T_init=None, duration_s=3600.0, dt_s=10.0, tolerance=None, max_time=None, rate_tolerance=None):
+        if isinstance(I, (np.ndarray, list, tuple)):
+            I = I[0]
+        I = float(I)
+        if T_init is None:
+            T_init = self.T_init
+        if tolerance is None:
+            tolerance = self.stabilization_tolerance
+        if rate_tolerance is None:
+            rate_tolerance = self.stabilization_rate_tolerance
+        if max_time is None:
+            max_time = self.stabilization_max_time
+
+        duration_s = min(float(duration_s), float(max_time))
+        dt_s = max(float(dt_s), 1.0)
+
+        ss = self.steady_state(I)
+        Tc_target = float(ss['Tc'])
+        Tc = float(T_init)
+        Th = self._solve_hot_side_temperature(Tc, I)
+
+        times = [0.0]
+        Tc_hist = [Tc]
+        Th_hist = [Th]
+        prev_Tc = Tc
+
+        for _ in range(int(np.ceil(duration_s / dt_s))):
+            if times[-1] >= duration_s:
+                break
+            Qc, Qh, _, _, _, _, _ = self.total_performance(Tc, Th, I)
+            loss = self.U * self.A_ext * (self.T_amb - Tc)
+            dTc_dt = (Qc - loss) / self.C_al
+            Tc = Tc + dTc_dt * dt_s
+            Th = self._solve_hot_side_temperature(Tc, I)
+            next_t = min(times[-1] + dt_s, duration_s)
+            times.append(float(next_t))
+            Tc_hist.append(float(Tc))
+            Th_hist.append(float(Th))
+            delta_Tc = abs(Tc - prev_Tc)
+            prev_Tc = Tc
+            if abs(Tc - Tc_target) <= tolerance and abs(delta_Tc / dt_s) <= rate_tolerance:
+                break
+
+        return {
+            'time_s': np.array(times),
+            'Tc': np.array(Tc_hist),
+            'Th': np.array(Th_hist),
+            'Tc_target': Tc_target,
+            'stabilization_time_s': float(times[-1])
+        }
+
+    def plot_temperature_transient(self, I, T_init=None, duration_s=3600.0, dt_s=10.0, tolerance=None, max_time=None, show=True):
+        sim = self.simulate_temperature_transient(I, T_init=T_init, duration_s=duration_s, dt_s=dt_s, tolerance=tolerance, max_time=max_time)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(sim['time_s'] / 60.0, sim['Tc'], label='Temperatura do bloco (°C)', color='tab:blue')
+        ax.axhline(sim['Tc_target'], linestyle='--', color='tab:red', label='Valor de regime')
+        ax.axvline(sim['stabilization_time_s'] / 60.0, linestyle=':', color='tab:green', label='Tempo de estabilização')
+        ax.set_xlabel('Tempo (min)')
+        ax.set_ylabel('Temperatura (°C)')
+        ax.set_title('Evolução da temperatura até estabilização')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        if show:
+            plt.show()
+        return fig, ax, sim
 
     def sensitivity_dTc_dI(self, I):
         if isinstance(I, (np.ndarray, list, tuple)):
@@ -274,13 +396,13 @@ class ParallelThermoelectricSensitivity:
 
 if __name__ == "__main__":
     params = {
-        'dim_bloco': (0.20, 0.20, 0.20),
-        'L_ins': 0.05,
+        'dim_bloco': (0.19, 0.11, 0.14),
+        'L_ins': 0.015,
         'k_ins': 0.035,
-        'h_int': 10.0,
-        'h_ext': 10.0,
-        'T_amb': 36.0,
-        'n_TEC': 2,
+        'h_int': 8.0,
+        'h_ext': 22.0,
+        'T_amb': 28,
+        'n_TEC': 1,
         'alpha0': 0.050,
         'R0': 2.0,
         'K0': 0.8,
@@ -288,15 +410,31 @@ if __name__ == "__main__":
         'beta_R': 0.004,
         'beta_K': 0.0015,
         'cooling_type': 'air',
-        'R_hs': 0.1
+        'R_hs': 0.39,
+        'm_dot_w': 0.05,              # kg/s # type: ignore
+        'cp_w': 4180.0,               # J/kg·K
+        'T_w_in': 28.2,               # °C
+        'R_block': 0.02,    
+        'T_init': 28.2,
+        'stabilization_tolerance': 0.5,
+        'stabilization_rate_tolerance': 0.01,
+        'stabilization_max_time': 7200.0           # K/W
     }
     sys = ParallelThermoelectricSensitivity(params)
 
-    I_test = 3.82
+    I_test = 5
     print(f"Estado estacionário para I = {I_test} A:")
     ss = sys.steady_state(I_test)
     for k, v in ss.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    print(f"\nTempo estimado de estabilização: {ss['tempo_estabilizacao_s']/60.0:.1f} min")
+
+    sim = sys.simulate_temperature_transient(I_test, duration_s=1800.0, dt_s=10.0)
+    print(f"Tempo real de estabilização (simulação): {sim['stabilization_time_s']/60.0:.1f} min")
+    fig, _, _ = sys.plot_temperature_transient(I_test, duration_s=1800.0, dt_s=10.0, show=False)
+    fig.savefig('temperatura_estabilizacao.png', dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print('Gráfico salvo em temperatura_estabilizacao.png')
 
     dTc, dTh = sys.sensitivity_dTc_dI(I_test)
     print(f"\nSensibilidade dTc/dI = {dTc:.4f} °C/A")
