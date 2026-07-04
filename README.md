@@ -13,6 +13,7 @@ Este repositório contém a implementação em Python de um modelo numérico tra
 
 if __name__ == "__main__":
     params = {
+    
         # --- GEOMETRIA E ISOLAMENTO ---
         'dim_bloco': (0.19, 0.11, 0.14),           # Dimensões externas da câmara/bloco (Comprimento, Largura, Altura) em [m]
         'L_ins': 0.020,                             # Espessura da camada de isolamento térmico em [m] (Ex: 20 mm)
