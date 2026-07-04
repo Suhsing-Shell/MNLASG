@@ -11,9 +11,6 @@ Este repositório contém a implementação em Python de um modelo numérico tra
 
 # Parâmentros
 
-if __name__ == "__main__":
-    params = {
-    
         # --- GEOMETRIA E ISOLAMENTO ---
         'dim_bloco': (0.19, 0.11, 0.14),           # Dimensões externas da câmara/bloco (Comprimento, Largura, Altura) em [m]
         'L_ins': 0.020,                             # Espessura da camada de isolamento térmico em [m] (Ex: 20 mm)
@@ -54,8 +51,6 @@ if __name__ == "__main__":
         'stabilization_tolerance': 0.5,             # Janela de tolerância absoluta para considerar a temperatura estável em [°C]
         'stabilization_rate_tolerance': 0.01,        # Taxa de variação máxima (dT/dt) permitida para definir regime permanente em [K/s]
         'stabilization_max_time': 7200.0            # Tempo limite máximo de execução da simulação em [s] (Equivale a 2 horas)
-    }
-    sys = ParallelThermoelectricSensitivity(params)
 
     # --- PARÂMETROS DE ENTRADA DO ENSAIO ---
     I_test = 5.9                                    # Corrente elétrica contínua aplicada para testar a pastilha Peltier em [A]
